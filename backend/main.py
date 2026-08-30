@@ -1,22 +1,27 @@
-import httpx
-
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import logging
 
-from pdf_utils import extract_text_from_pdf
+from cv_extractor import extract_cv_text
 from models import MatchAnalysis
 from pydantic import ValidationError
 
+
+logger = logging.getLogger("uvicorn.error")
 app = FastAPI(
     title="AI Job Description Analyzer"
 )
-
+from llm_provider import (
+    generate_with_llm,
+    LLMProviderError,
+)
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        "http://localhost:5173"
+        "http://localhost:5173",
+        "https://career-copilot-frontend.kindsand-10a068b0.germanywestcentral.azurecontainerapps.io",
     ],
     allow_credentials=True,
     allow_methods=["*"],
@@ -65,36 +70,18 @@ JOB DESCRIPTION:
 """
 
     try:
+        generated_text = await generate_with_llm(
+            prompt
+        )
 
-        async with httpx.AsyncClient(
-            timeout=120
-        ) as client:
+        return {
+            "analysis": generated_text
+        }
 
-            response = await client.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": "gemma3:4b",
-                    "prompt": prompt,
-                    "stream": False,
-                },
-            )
-
-            response.raise_for_status()
-
-            result = response.json()
-
-            return {
-                "analysis": result["response"]
-            }
-
-    except httpx.RequestError:
-
+    except LLMProviderError as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Could not connect to Ollama. "
-                "Make sure Ollama is running."
-            )
+            detail=str(exc),
         )
         
 
@@ -129,10 +116,13 @@ async def match_cv_to_job(
 
     file_bytes = await cv.read()
 
-    cv_text = extract_text_from_pdf(
+    cv_text = extract_cv_text(
         file_bytes
     )
-
+    logger.info(
+    "CV extraction completed successfully. Characters extracted: %d",
+    len(cv_text),
+    )
     if not cv_text.strip():
         raise HTTPException(
             status_code=400,
@@ -257,56 +247,28 @@ async def match_cv_to_job(
     """
 
     try:
+        generated_text = await generate_with_llm(
+            prompt,
+            schema=schema,
+        )
 
-        async with httpx.AsyncClient(
-            timeout=120
-        ) as client:
+        analysis = MatchAnalysis.model_validate_json(
+            generated_text
+        )
 
-            response = await client.post(
-                "http://localhost:11434/api/generate",
-                json={
-                    "model": "gemma3:4b",
-                    "prompt": prompt,
-                    "stream": False,
-
-                    "format": schema,
-
-                    "options": {
-                        "temperature": 0
-                    },
-                },
-            )
-
-            response.raise_for_status()
-
-            ollama_response = (
-                response.json()
-            )
-
-            generated_text = ollama_response["response"]
-
-            analysis = MatchAnalysis.model_validate_json(
-                generated_text
-            )
-
-            return analysis
+        return analysis
 
     except ValidationError:
-
         raise HTTPException(
             status_code=500,
             detail=(
                 "The AI returned an invalid "
                 "analysis format."
-            )
+            ),
         )
 
-    except httpx.RequestError:
-
+    except LLMProviderError as exc:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "Could not connect to Ollama."
-            )
+            detail=str(exc),
         )
-        

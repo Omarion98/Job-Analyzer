@@ -2,3 +2,5 @@ fastapi[standard]
 httpx
 pypdf
 python-multipart
+azure-ai-documentintelligence
+azure-identity

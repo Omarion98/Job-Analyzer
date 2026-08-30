@@ -1,6 +1,9 @@
 import { useRef, useState } from "react";
 import "./App.css";
 
+const API_BASE_URL =
+  import.meta.env.VITE_API_URL || "http://localhost:8000";
+
 interface MatchAnalysis {
   match_score: number;
 
@@ -245,7 +248,7 @@ function App() {
       );
 
       const response = await fetch(
-        "http://localhost:8000/api/match",
+        `${API_BASE_URL}/api/match`,
         {
           method: "POST",
           body: formData,
