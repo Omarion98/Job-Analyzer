@@ -4,3 +4,4 @@ pypdf
 python-multipart
 azure-ai-documentintelligence
 azure-identity
+azure-monitor-opentelemetry

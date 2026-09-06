@@ -1,20 +1,38 @@
-from fastapi import FastAPI, HTTPException, UploadFile, File, Form
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import logging
 
-from cv_extractor import extract_cv_text
-from models import MatchAnalysis
+from telemetry import (
+    setup_telemetry,
+    get_tracer,
+)
+
+# Configure telemetry before importing FastAPI so automatic
+# FastAPI instrumentation can be registered correctly.
+setup_telemetry()
+
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    UploadFile,
+    File,
+    Form,
+)
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
-
-logger = logging.getLogger("uvicorn.error")
-app = FastAPI(
-    title="AI Job Description Analyzer"
-)
+from cv_extractor import extract_cv_text
 from llm_provider import (
     generate_with_llm,
     LLMProviderError,
+)
+from models import MatchAnalysis
+
+
+logger = logging.getLogger("uvicorn.error")
+tracer = get_tracer("api")
+
+app = FastAPI(
+    title="AI Job Description Analyzer"
 )
 
 app.add_middleware(
@@ -49,7 +67,15 @@ async def analyze_job(request: JobRequest):
             detail="Job description is empty"
         )
 
-    prompt = f"""
+    with tracer.start_as_current_span(
+        "analyze.prompt.build"
+    ) as span:
+        span.set_attribute(
+            "job_description.characters",
+            len(request.job_description),
+        )
+
+        prompt = f"""
 You are an AI career assistant.
 
 Analyze the following job description.
@@ -83,7 +109,7 @@ JOB DESCRIPTION:
             status_code=503,
             detail=str(exc),
         )
-        
+
 
 @app.post(
     "/api/match",
@@ -114,15 +140,26 @@ async def match_cv_to_job(
             detail="Job description is empty"
         )
 
-    file_bytes = await cv.read()
+    with tracer.start_as_current_span(
+        "cv.upload.read"
+    ) as span:
+        file_bytes = await cv.read()
+
+        span.set_attribute(
+            "cv.input_bytes",
+            len(file_bytes),
+        )
 
     cv_text = extract_cv_text(
         file_bytes
     )
+
     logger.info(
-    "CV extraction completed successfully. Characters extracted: %d",
-    len(cv_text),
+        "CV extraction completed successfully. "
+        "Characters extracted: %d",
+        len(cv_text),
     )
+
     if not cv_text.strip():
         raise HTTPException(
             status_code=400,
@@ -132,11 +169,26 @@ async def match_cv_to_job(
             )
         )
 
-    schema = (
-        MatchAnalysis.model_json_schema()
-    )
+    with tracer.start_as_current_span(
+        "match.schema.build"
+    ):
+        schema = (
+            MatchAnalysis.model_json_schema()
+        )
 
-    prompt = f"""
+    with tracer.start_as_current_span(
+        "match.prompt.build"
+    ) as span:
+        span.set_attribute(
+            "cv.extracted_characters",
+            len(cv_text),
+        )
+        span.set_attribute(
+            "job_description.characters",
+            len(job_description),
+        )
+
+        prompt = f"""
     You are a senior AI Engineering recruiter.
 
     Compare the candidate CV against the job description.
@@ -246,15 +298,30 @@ async def match_cv_to_job(
     {job_description}
     """
 
+        span.set_attribute(
+            "llm.prompt_characters",
+            len(prompt),
+        )
+
     try:
         generated_text = await generate_with_llm(
             prompt,
             schema=schema,
         )
 
-        analysis = MatchAnalysis.model_validate_json(
-            generated_text
-        )
+        with tracer.start_as_current_span(
+            "response.validation"
+        ) as span:
+            analysis = (
+                MatchAnalysis.model_validate_json(
+                    generated_text
+                )
+            )
+
+            span.set_attribute(
+                "match.score",
+                analysis.match_score,
+            )
 
         return analysis
 
